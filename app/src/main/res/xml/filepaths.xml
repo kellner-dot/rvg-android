@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider paths for the self-updater: serves the downloaded APK
+     from the external cache dir to the system package installer. -->
+<paths>
+    <external-cache-path name="updates" path="." />
+</paths>

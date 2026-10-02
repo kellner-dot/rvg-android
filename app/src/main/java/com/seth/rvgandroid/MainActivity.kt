@@ -38,7 +38,7 @@ class MainActivity : Activity() {
         setContentView(scroll)
 
         val title = TextView(this).apply {
-            text = "RVG Android Agent v1.0.6"
+            text = "RVG Android Agent v" + UpdateManager.installedVersion(this@MainActivity)
             textSize = 22f
         }
         layout.addView(title)
@@ -59,7 +59,9 @@ class MainActivity : Activity() {
         btn("Start Agent") { RvgService.start(this); refresh() }
         btn("Stop Agent") { RvgService.stop(this); refresh() }
         btn("Copy Token (backup to Drive)") { copyToken() }
+        btn("Check for Updates") { UpdateManager.checkNow(this) }
 
+        UpdateManager.onAppLaunch(this)
         refresh()
     }
 

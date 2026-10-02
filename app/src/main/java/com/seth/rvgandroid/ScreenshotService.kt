@@ -47,7 +47,7 @@ class ScreenshotService : Service() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        startForegroundNotification()
+        // startForegroundNotification() // Disabled for Android 14+ compat
     }
 
     override fun onDestroy() {

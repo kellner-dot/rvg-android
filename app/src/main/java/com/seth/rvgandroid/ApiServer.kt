@@ -75,7 +75,7 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
         wm.defaultDisplay.getRealMetrics(metrics)
         val o = JSONObject()
             .put("ok", true)
-            .put("version", "1.0.0")
+            .put("version", "1.0.6")
             .put("platform", "android")
             .put("hostname", Build.MODEL)
             .put("manufacturer", Build.MANUFACTURER)
@@ -85,13 +85,15 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
             .put("screenH", metrics.heightPixels)
             .put("uptime", (SystemClock.elapsedRealtime() - startTime) / 1000)
             .put("accessibility", RvgAccessibilityService.isEnabled())
-            .put("screenshotReady", ScreenshotService.instance?.isReady() == true)
+            .put("screenshotReady", RvgAccessibilityService.isEnabled())
         return HttpServer.Response.json(o.toString())
     }
 
     private fun shot(req: HttpServer.Request): HttpServer.Response {
-        val png = ScreenshotService.instance?.capturePng()
-            ?: return HttpServer.Response.jsonErr(503, "screenshot not ready (grant screen capture permission in app)")
+        val svc = RvgAccessibilityService.instance
+            ?: return HttpServer.Response.jsonErr(503, "accessibility service not enabled (screenshots need it)")
+        val png = svc.takeScreenshotPng()
+            ?: return HttpServer.Response.jsonErr(503, "screenshot capture failed")
         return HttpServer.Response(200, png, "image/png")
     }
 

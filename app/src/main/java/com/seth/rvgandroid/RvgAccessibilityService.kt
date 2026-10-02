@@ -2,12 +2,16 @@ package com.seth.rvgandroid
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.graphics.Bitmap
 import android.graphics.Path
 import android.os.Build
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Accessibility service providing tap / swipe / key input without root.
@@ -90,8 +94,58 @@ class RvgAccessibilityService : AccessibilityService() {
         )
     }
 
-    private fun dispatchGestureSync(gesture: GestureDescription): Boolean {
+    /**
+     * Screenshot via AccessibilityService.takeScreenshot() (API 30+).
+     * No MediaProjection consent dialog, no foreground service, no per-reboot
+     * re-grant — the accessibility permission (already granted) is sufficient.
+     * Blocks the calling thread up to timeoutMs for the async callback.
+     * Returns PNG bytes, or null on failure / unsupported API level.
+     */
+    fun takeScreenshotPng(timeoutMs: Long = 8000): ByteArray? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         val latch = CountDownLatch(1)
+        val result = AtomicReference<Bitmap?>(null)
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        mainHandler.post {
+            try {
+                takeScreenshot(
+                    Display.DEFAULT_DISPLAY,
+                    java.util.concurrent.Executor { it.run() },
+                    object : TakeScreenshotCallback {
+                        override fun onSuccess(screenshot: ScreenshotResult) {
+                            try {
+                                val hwBitmap = Bitmap.wrapHardwareBuffer(
+                                    screenshot.hardwareBuffer, screenshot.colorSpace)
+                                // Hardware bitmaps can't be PNG-compressed; copy to software.
+                                result.set(hwBitmap?.copy(Bitmap.Config.ARGB_8888, false))
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            } finally {
+                                try { screenshot.hardwareBuffer.close() } catch (_: Exception) {}
+                                latch.countDown()
+                            }
+                        }
+                        override fun onFailure(errorCode: Int) {
+                            latch.countDown()
+                        }
+                    })
+            } catch (e: Exception) {
+                e.printStackTrace()
+                latch.countDown()
+            }
+        }
+        latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        val bmp = result.get() ?: return null
+        return try {
+            val out = ByteArrayOutputStream()
+            bmp.compress(Bitmap.CompressFormat.PNG, 90, out)
+            out.toByteArray()
+        } finally {
+            bmp.recycle()
+        }
+    }
+
+    private fun dispatchGestureSync(gesture: GestureDescription): Boolean {        val latch = CountDownLatch(1)
         val ok = AtomicBoolean(false)
         dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {

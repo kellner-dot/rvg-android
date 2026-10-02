@@ -1,6 +1,5 @@
 <resources>
-    <style name="Theme.RvgAndroid" parent="Theme.MaterialComponents.DayNight.DarkActionBar">
-        <item name="colorPrimary">#00E5FF</item>
-        <item name="colorOnPrimary">#000000</item>
+    <style name="Theme.RvgAndroid" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">#00E5FF</item>
     </style>
 </resources>

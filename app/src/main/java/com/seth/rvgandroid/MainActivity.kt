@@ -15,7 +15,6 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.appcompat.app.AppCompatActivity
 
 /**
  * Setup wizard + status screen. Walks Seth through:
@@ -25,7 +24,7 @@ import androidx.appcompat.app.AppCompatActivity
  *  4. Notification permission (Android 13+)
  * Shows the token for backup to Drive.
  */
-class MainActivity : AppCompatActivity() {
+class MainActivity : Activity() {
 
     private lateinit var statusText: TextView
     private val shotRequestCode = 1001

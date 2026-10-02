@@ -20,7 +20,7 @@ class RvgService : Service() {
 
         fun start(ctx: Context) {
             val i = Intent(ctx, RvgService::class.java)
-            ctx.startForegroundService(i)
+            ctx.startService(i)
         }
 
         fun stop(ctx: Context) {
@@ -47,7 +47,7 @@ class RvgService : Service() {
             .setContentText("Listening on port $PORT")
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .build()
-        startForeground(2, n)
+        // startForeground(2, n) // Disabled - not needed, causes Android 14+ crash
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

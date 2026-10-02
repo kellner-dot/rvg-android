@@ -16,7 +16,14 @@ import java.io.File
  *   GET  /rvd/status            -> agent status JSON
  *   GET  /rvd/shot              -> PNG screenshot
  *   POST /rvd/input             -> {"tap":[x,y]} | {"swipe":[x1,y1,x2,y2]} |
- *                                  {"key":"home"} | {"type":"text"}
+ *                                  {"key":"home"} | {"type":"text"} |
+ *                                  {"keytext":"text"} | {"longpress":[x,y]}
+ *   Text input: "type" uses ACTION_SET_TEXT on the focused EditText (fast
+ *   path) and FALLS BACK to the RVG keyboard IME when the target isn't an
+ *   EditText (e.g. Termux's TerminalView). "keytext" goes straight to the
+ *   IME. Single-char {"key":"a"} also uses the IME. The IME path needs
+ *   "RVG Keyboard" enabled + selected once in system keyboard settings;
+ *   /rvd/status reports "imeEnabled"/"imeActive".
  *   POST /rvd/exec              -> {"command":"..."} limited command set
  *   GET  /rvd/download?path=    -> file bytes (sandbox-scoped)
  *   POST /rvd/upload            -> multipart file -> inbox dir
@@ -75,7 +82,7 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
         wm.defaultDisplay.getRealMetrics(metrics)
         val o = JSONObject()
             .put("ok", true)
-            .put("version", "1.0.6")
+            .put("version", appVersion())
             .put("platform", "android")
             .put("hostname", Build.MODEL)
             .put("manufacturer", Build.MANUFACTURER)
@@ -86,8 +93,16 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
             .put("uptime", (SystemClock.elapsedRealtime() - startTime) / 1000)
             .put("accessibility", RvgAccessibilityService.isEnabled())
             .put("screenshotReady", RvgAccessibilityService.isEnabled())
+            .put("imeEnabled", RvgInputMethodService.isEnabled(ctx))
+            .put("imeActive", RvgInputMethodService.isActive(ctx))
         return HttpServer.Response.json(o.toString())
     }
+
+    /** Real versionName from the installed package — never a stale literal. */
+    private fun appVersion(): String = try {
+        @Suppress("DEPRECATION")
+        ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "?"
+    } catch (_: Exception) { "?" }
 
     private fun shot(req: HttpServer.Request): HttpServer.Response {
         val svc = RvgAccessibilityService.instance
@@ -119,7 +134,13 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
                 svc.longPress(a.getDouble(0).toFloat(), a.getDouble(1).toFloat())
             }
             j.has("key") -> svc.key(j.getString("key"))
-            j.has("type") -> svc.typeText(j.getString("type"))
+            j.has("type") -> {
+                // Fast path first (EditText), then the RVG keyboard IME so
+                // terminals and other non-EditText views work transparently.
+                val t = j.getString("type")
+                svc.typeText(t) || RvgInputMethodService.typeText(t)
+            }
+            j.has("keytext") -> RvgInputMethodService.typeText(j.getString("keytext"))
             else -> return HttpServer.Response.jsonErr(400, "unknown input action")
         }
         return HttpServer.Response.json("{\"ok\":$ok}")

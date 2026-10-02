@@ -65,6 +65,10 @@ class RvgAccessibilityService : AccessibilityService() {
 
     /** Press a hardware/software key via global action mapping. */
     fun key(name: String): Boolean {
+        // Single character -> route through the RVG keyboard IME (works in
+        // terminals and other non-EditText views); falls back to false when
+        // the IME isn't the active keyboard.
+        if (name.length == 1) return RvgInputMethodService.typeText(name)
         return when (name.lowercase()) {
             "home" -> performGlobalAction(GLOBAL_ACTION_HOME)
             "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
@@ -78,7 +82,14 @@ class RvgAccessibilityService : AccessibilityService() {
         }
     }
 
-    /** Type text into the currently focused editable field. */
+    /**
+     * Type text into the currently focused editable field.
+     *
+     * NOTE on limits: this uses ACTION_SET_TEXT, which only EditText-style
+     * fields accept. Terminal emulators (Termux) and other custom views need
+     * the RVG keyboard IME instead — see RvgInputMethodService. The /rvd/input
+     * "type" command tries this fast path first, then the IME automatically.
+     */
     fun typeText(text: String): Boolean {
         val root = rootInActiveWindow ?: return false
         val focused = root.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)

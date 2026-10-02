@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">RVG Android</string>
+    <string name="accessibility_description">RVG Android remote agent. Allows remote tap, swipe, and key input from Seth's Kavi assistants. Enable only on Seth's own device.</string>
+</resources>

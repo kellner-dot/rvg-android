@@ -47,7 +47,7 @@ class RvgService : Service() {
             .setContentText("Listening on port $PORT")
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .build()
-        startForeground(2, n, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        startForeground(2, n)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

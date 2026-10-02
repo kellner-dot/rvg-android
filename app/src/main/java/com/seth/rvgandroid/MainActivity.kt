@@ -129,7 +129,7 @@ class MainActivity : Activity() {
                 putExtra(ScreenshotService.EXTRA_RESULT_CODE, resultCode)
                 putExtra(ScreenshotService.EXTRA_DATA, data)
             }
-            startForegroundService(i)
+            startService(i)
             Toast.makeText(this, "Screen capture granted", Toast.LENGTH_SHORT).show()
         } else if (requestCode == shotRequestCode) {
             Toast.makeText(this, "Screen capture denied — screenshots won't work", Toast.LENGTH_LONG).show()

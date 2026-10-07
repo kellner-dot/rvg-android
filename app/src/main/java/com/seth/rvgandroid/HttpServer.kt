@@ -72,11 +72,23 @@ class HttpServer(private val port: Int) {
                 val output = s.getOutputStream()
                 val reader = BufferedReader(InputStreamReader(input, Charsets.ISO_8859_1))
 
-                val requestLine = reader.readLine() ?: return
-                val parts = requestLine.split(" ")
-                if (parts.size < 2) return
+                // Skip leading blank lines (some clients/proxies send them); a
+                // null read means the client went away — nothing to respond to.
+                var requestLine: String? = null
+                for (i in 0 until 5) {
+                    val line = reader.readLine() ?: return
+                    if (line.isNotEmpty()) { requestLine = line; break }
+                }
+                val rl = requestLine ?: return
+                val parts = rl.split(" ")
+                if (parts.size < 2) {
+                    // Malformed request: answer 400 instead of closing silently,
+                    // so the client gets a diagnosable response, not an empty reply.
+                    writeResponse(output, Response.jsonErr(400, "malformed request line"))
+                    return
+                }
                 val method = parts[0].uppercase()
-                val target = parts[1]
+                val target = extractPath(parts[1])
 
                 val headers = mutableMapOf<String, String>()
                 while (true) {
@@ -106,6 +118,21 @@ class HttpServer(private val port: Int) {
             }
         } catch (_: Exception) {
         }
+    }
+
+    /**
+     * Extract the origin-form path from a request target. Proxies send the
+     * absolute URI (GET http://host:port/path HTTP/1.1); without this the
+     * path never matches a route and every proxied request 404s.
+     */
+    private fun extractPath(target: String): String {
+        var t = target
+        val schemeIdx = t.indexOf("://")
+        if (schemeIdx >= 0) {
+            val slashIdx = t.indexOf('/', schemeIdx + 3)
+            t = if (slashIdx >= 0) t.substring(slashIdx) else "/"
+        }
+        return t
     }
 
     /** Read exactly contentLength bytes, accounting for BufferedReader buffering. */

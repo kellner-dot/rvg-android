@@ -9,6 +9,7 @@ import android.os.Environment
 import android.os.SystemClock
 import org.json.JSONObject
 import java.io.File
+import java.security.MessageDigest
 
 /**
  * API layer mirroring the Windows/Mac RVG protocol (port 8899).
@@ -47,13 +48,21 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
         http.handler = { req -> route(req) }
     }
 
+    /** Constant-time token comparison; empty on either side never matches. */
+    private fun tokenMatches(got: String?, token: String): Boolean {
+        if (got.isNullOrEmpty() || token.isEmpty()) return false
+        return MessageDigest.isEqual(
+            got.toByteArray(Charsets.UTF_8),
+            token.toByteArray(Charsets.UTF_8))
+    }
+
     private fun route(req: HttpServer.Request): HttpServer.Response {
-        // Auth (skip for /rvd/view so the browser viewer loads; API calls
-        // from the page still carry the token via JS fetch).
+        // Auth (skip for /rvd/view: the page itself carries no secrets, the
+        // token is typed in-page and sent via JS fetch like the Mac viewer).
         val token = TokenStore.getToken(ctx)
         if (req.path != "/rvd/view") {
             val got = req.headers["x-rvd-token"]
-            if (got != token) return HttpServer.Response.jsonErr(401, "bad or missing token")
+            if (!tokenMatches(got, token)) return HttpServer.Response.jsonErr(401, "bad or missing token")
         }
 
         return try {
@@ -277,42 +286,85 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
         return HttpServer.Response.json("{\"ok\":true}")
     }
 
+    /**
+     * Viewer page with an in-page token gate (mirrors the Mac viewer).
+     * The server never embeds the token in the HTML: the user types it
+     * once, JS keeps it in a variable and sends it as the X-RVD-Token
+     * header on every API call. Screenshots are fetched as blobs because
+     * an <img> tag cannot send custom headers.
+     */
     private fun view(req: HttpServer.Request): HttpServer.Response {
-        val token = req.query["token"] ?: TokenStore.getToken(ctx)
         val html = """
         <!doctype html><html><head><meta charset="utf-8">
         <meta name="viewport" content="width=device-width,initial-scale=1">
         <title>RVG Android viewer</title>
         <style>body{background:#111;color:#eee;font-family:sans-serif;text-align:center}
-        img{max-width:100%;border:1px solid #444}button{margin:4px;padding:8px 14px}</style>
+        img{max-width:100%;border:1px solid #444}button{margin:4px;padding:8px 14px}
+        #gate{margin:32px auto;max-width:300px}#gate input{width:100%;padding:8px;margin:6px 0}
+        #app{display:none}</style>
         </head><body>
         <h3>RVG Android — ${Build.MODEL}</h3>
-        <img id="shot" src="/rvd/shot"><br>
-        <button onclick="tap(event)">tap: click image</button>
-        <button onclick="key('back')">back</button>
-        <button onclick="key('home')">home</button>
-        <button onclick="key('recents')">recents</button>
-        <button onclick="refresh()">refresh</button>
+        <div id="gate">
+          <p>Enter the RVG token to view and control this device.</p>
+          <input id="tok" type="password" placeholder="token" autocomplete="off">
+          <br><button onclick="connect()">Connect</button>
+        </div>
+        <div id="app">
+          <img id="shot" alt="screenshot"><br>
+          <button onclick="tap(event)">tap: click image</button>
+          <button onclick="key('back')">back</button>
+          <button onclick="key('home')">home</button>
+          <button onclick="key('recents')">recents</button>
+          <button onclick="refresh()">refresh</button>
+        </div>
         <script>
-        const T = ${JSONObject.quote(token)};
-        const H = {"X-RVD-Token": T};
-        function refresh(){ document.getElementById('shot').src = '/rvd/shot?' + Date.now(); }
+        let T = '';
+        function H(){ return {"X-RVD-Token": T}; }
+        function connect(){
+          T = document.getElementById('tok').value.trim();
+          document.getElementById('tok').value = '';
+          if(!T) return;
+          fetch('/rvd/status',{headers:H()}).then(r => {
+            if(r.ok){
+              document.getElementById('gate').style.display='none';
+              document.getElementById('app').style.display='block';
+              refresh();
+              setInterval(refresh, 5000);
+            } else {
+              T = '';
+              alert('bad token');
+            }
+          });
+        }
+        async function refresh(){
+          if(!T) return;
+          const r = await fetch('/rvd/shot',{headers:H()});
+          if(r.status === 401){ location.reload(); return; }
+          if(!r.ok) return;
+          const b = await r.blob();
+          const img = document.getElementById('shot');
+          const old = img.src;
+          img.src = URL.createObjectURL(b);
+          if(old.startsWith('blob:')) URL.revokeObjectURL(old);
+        }
         async function tap(e){
           const img = document.getElementById('shot');
           const r = img.getBoundingClientRect();
-          const st = await (await fetch('/rvd/status',{headers:H})).json();
+          const st = await (await fetch('/rvd/status',{headers:H()})).json();
           const x = Math.round((e.clientX - r.left) / r.width * st.screenW);
           const y = Math.round((e.clientY - r.top) / r.height * st.screenH);
-          await fetch('/rvd/input',{method:'POST',headers:{...H,'Content-Type':'application/json'},
+          await fetch('/rvd/input',{method:'POST',headers:{...H(),'Content-Type':'application/json'},
             body: JSON.stringify({tap:[x,y]})});
           setTimeout(refresh, 400);
         }
         async function key(k){
-          await fetch('/rvd/input',{method:'POST',headers:{...H,'Content-Type':'application/json'},
+          await fetch('/rvd/input',{method:'POST',headers:{...H(),'Content-Type':'application/json'},
             body: JSON.stringify({key:k})});
           setTimeout(refresh, 400);
         }
-        setInterval(refresh, 5000);
+        document.getElementById('tok').addEventListener('keydown', e => {
+          if(e.key === 'Enter') connect();
+        });
         </script></body></html>
         """.trimIndent()
         return HttpServer.Response(200, html.toByteArray(Charsets.UTF_8), "text/html")

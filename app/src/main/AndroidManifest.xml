@@ -66,6 +66,9 @@
 
         <receiver android:name=".UpdateCheckReceiver" android:exported="false" />
 
+        <!-- Receives PackageInstaller session results for self-updates. -->
+        <receiver android:name=".UpdateInstallReceiver" android:exported="false" />
+
         <!-- "RVG Keyboard": null-UI input method for true remote typing
              (terminals etc.). User enables it once in system keyboard settings. -->
         <service

@@ -4,9 +4,11 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Bitmap
 import android.graphics.Path
+import android.graphics.Rect
 import android.os.Build
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -39,10 +41,14 @@ class RvgAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
 
-    /** Tap at (x, y) in screen pixels. Returns true if the gesture dispatched. */
-    fun tap(x: Float, y: Float): Boolean {
+    /** Tap at (x, y) in screen pixels. Returns true if the gesture dispatched.
+     *  durationMs is the stroke duration (default 50 ms, the v1.1.0 value);
+     *  it is now a parameter instead of a hardcoded constant so the driver
+     *  can vary it — it is NOT expected to fix penetration-class buttons
+     *  (the mapping study ruled duration out for that class). */
+    fun tap(x: Float, y: Float, durationMs: Long = 50): Boolean {
         val path = Path().apply { moveTo(x, y) }
-        val stroke = GestureDescription.StrokeDescription(path, 0, 50)
+        val stroke = GestureDescription.StrokeDescription(path, 0, durationMs)
         return dispatchGestureSync(GestureDescription.Builder().addStroke(stroke).build())
     }
 
@@ -103,6 +109,107 @@ class RvgAccessibilityService : AccessibilityService() {
         return focused.performAction(
             android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, args
         )
+    }
+
+    /**
+     * Node-based activation (the mapping study's PRIMARY fix).
+     *
+     * Walks rootInActiveWindow and selects the deepest clickable node
+     * whose screen bounds contain (x, y) (ties → smallest bounds),
+     * via NodeSelector. This is a DIFFERENT dispatch path from
+     * dispatchGesture: view-level accessibility activation (the path
+     * TalkBack-style interaction uses) instead of gesture injection.
+     * Whether a given non-penetrating surface responds to it is
+     * unproven until the device pilot — these methods report exactly
+     * what happened so the pilot can tell "no node" apart from
+     * "node clicked but ignored".
+     *
+     * Node lifecycle: every visited node is collected and recycled
+     * AFTER the walk and AFTER any action on the winner. Nodes are
+     * deliberately not recycled mid-walk: an early best candidate
+     * can be an ancestor of a later, deeper winner, and recycling it
+     * mid-traversal would corrupt the walk. These calls are
+     * infrequent (one per gated element), so the transient node
+     * list is cheap.
+     */
+    data class NodeClickResult(
+        val found: Boolean,
+        val node: NodeSelector.Candidate?,
+        val performed: Boolean
+    )
+
+    /** Read-only node query for a point: the winning node, or null. */
+    fun queryNodeAt(x: Float, y: Float): NodeSelector.Candidate? {
+        return findNodeAt(x.toInt(), y.toInt(), null).first
+    }
+
+    /** Node-click at a point: found + performed are reported separately. */
+    fun clickNodeAt(x: Float, y: Float): NodeClickResult {
+        val (best, performed) = findNodeAt(x.toInt(), y.toInt()) { node ->
+            try {
+                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            } catch (_: Exception) {
+                false
+            }
+        }
+        return NodeClickResult(
+            found = best != null,
+            node = best,
+            performed = performed
+        )
+    }
+
+    /**
+     * One walk. Selects the winner, runs [onWinner] on its live node
+     * BEFORE recycling (so clicks act on a live node), then recycles
+     * every visited node. Returns (winner, action result or false
+     * when no action was requested).
+     */
+    private fun findNodeAt(
+        x: Int,
+        y: Int,
+        onWinner: ((AccessibilityNodeInfo) -> Boolean)?
+    ): Pair<NodeSelector.Candidate?, Boolean> {
+        val root = rootInActiveWindow ?: return Pair(null, false)
+        val visited = ArrayList<AccessibilityNodeInfo>()
+        val pairs = ArrayList<Pair<NodeSelector.Candidate, AccessibilityNodeInfo>>()
+        fun visit(node: AccessibilityNodeInfo, depth: Int) {
+            visited.add(node)
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            if (node.isClickable) {
+                pairs.add(
+                    Pair(
+                        NodeSelector.Candidate(
+                            className = node.className?.toString() ?: "?",
+                            bounds = NodeSelector.Bounds(rect.left, rect.top, rect.right, rect.bottom),
+                            clickable = true,
+                            depth = depth
+                        ),
+                        node
+                    )
+                )
+            }
+            for (i in 0 until node.childCount) {
+                val child = try { node.getChild(i) } catch (_: Exception) { null }
+                if (child != null) visit(child, depth + 1)
+            }
+        }
+        try {
+            visit(root, 0)
+        } catch (_: Exception) {
+            // A tree that mutates mid-walk still yields whatever was collected.
+        }
+        val best = NodeSelector.selectBest(pairs.map { it.first }, x, y)
+        val nodeRef = pairs.firstOrNull { it.first === best }?.second
+        var performed = false
+        if (best != null && nodeRef != null && onWinner != null) {
+            performed = try { onWinner(nodeRef) } catch (_: Exception) { false }
+        }
+        for (n in visited) {
+            try { n.recycle() } catch (_: Exception) {}
+        }
+        return Pair(best, performed)
     }
 
     /**

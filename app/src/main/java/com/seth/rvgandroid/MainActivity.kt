@@ -80,6 +80,7 @@ class MainActivity : Activity() {
             Accessibility: ${if (acc) "ENABLED" else "NOT ENABLED"}
             Screenshots: ${if (acc) "READY (via accessibility)" else "need accessibility"}
             Battery optimization disabled: $battOk
+            Update: ${UpdateManager.updateVersion(this)?.let { "v$it available" } ?: "latest"}${UpdateManager.lastUpdateError(this)?.let { " (last error: $it)" } ?: ""}
             Token: ${TokenStore.getToken(this).take(12)}...
         """.trimIndent()
     }

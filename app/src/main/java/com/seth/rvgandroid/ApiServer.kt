@@ -104,6 +104,13 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
             .put("screenshotReady", RvgAccessibilityService.isEnabled())
             .put("imeEnabled", RvgInputMethodService.isEnabled(ctx))
             .put("imeActive", RvgInputMethodService.isActive(ctx))
+            // Self-update reporting (existing status path — every
+            // check/install/version transition lands here, never silent).
+            .put("updateAvailable", UpdateManager.updateAvailable(ctx))
+            .put("updateVersion", UpdateManager.updateVersion(ctx) ?: JSONObject.NULL)
+            .put("updateError", UpdateManager.lastUpdateError(ctx) ?: JSONObject.NULL)
+            .put("lastUpdateCheckMs", UpdateManager.lastCheckMs(ctx))
+            .put("lastUpdateResult", UpdateManager.lastUpdateResult(ctx) ?: JSONObject.NULL)
         return HttpServer.Response.json(o.toString())
     }
 
@@ -112,6 +119,16 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
         @Suppress("DEPRECATION")
         ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "?"
     } catch (_: Exception) { "?" }
+
+    /** Node info JSON for nodeclick/nodequery responses. */
+    private fun nodeJson(n: NodeSelector.Candidate): JSONObject =
+        JSONObject()
+            .put("class", n.className)
+            .put("bounds", org.json.JSONArray()
+                .put(n.bounds.left).put(n.bounds.top)
+                .put(n.bounds.right).put(n.bounds.bottom))
+            .put("clickable", n.clickable)
+            .put("depth", n.depth)
 
     private fun shot(req: HttpServer.Request): HttpServer.Response {
         val svc = RvgAccessibilityService.instance
@@ -125,10 +142,31 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
         val svc = RvgAccessibilityService.instance
             ?: return HttpServer.Response.jsonErr(503, "accessibility service not enabled")
         val j = JSONObject(String(req.body, Charsets.UTF_8))
+        // Node shapes return their own response (they carry node info,
+        // not just ok) — handled before the plain ok-boolean shapes.
+        if (j.has("nodeclick")) {
+            val a = j.getJSONArray("nodeclick")
+            val r = svc.clickNodeAt(a.getDouble(0).toFloat(), a.getDouble(1).toFloat())
+            val o = JSONObject().put("ok", r.found && r.performed)
+            if (r.node != null) o.put("node", nodeJson(r.node))
+            if (!r.found) o.put("error", "no node")
+            else if (!r.performed) o.put("error", "node click not performed")
+            return HttpServer.Response.json(o.toString())
+        }
+        if (j.has("nodequery")) {
+            val a = j.getJSONArray("nodequery")
+            val n = svc.queryNodeAt(a.getDouble(0).toFloat(), a.getDouble(1).toFloat())
+            val o = JSONObject().put("ok", true).put("found", n != null)
+            if (n != null) o.put("node", nodeJson(n)) else o.put("node", JSONObject.NULL)
+            return HttpServer.Response.json(o.toString())
+        }
         val ok = when {
             j.has("tap") -> {
                 val a = j.getJSONArray("tap")
-                svc.tap(a.getDouble(0).toFloat(), a.getDouble(1).toFloat())
+                // Optional 3rd element: stroke duration ms (default 50,
+                // the v1.1.0 value). Longpress stays 800 ms, unchanged.
+                val dur = if (a.length() > 2) a.getLong(2) else 50L
+                svc.tap(a.getDouble(0).toFloat(), a.getDouble(1).toFloat(), dur)
             }
             j.has("swipe") -> {
                 val a = j.getJSONArray("swipe")

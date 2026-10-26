@@ -7,20 +7,17 @@ import kotlin.concurrent.thread
 
 /**
  * Fired once daily by UpdateManager's AlarmManager schedule.
- * Version-metadata check only (~2KB) — never auto-downloads the APK.
- * If a newer version exists, a pending-update flag is saved and the
- * next app launch prompts Seth to download & install (one tap).
+ * v1.2.0: the daily check now AUTO-UPDATES when a newer version
+ * exists (download + verify + PackageInstaller session, no activity
+ * needed). Failures are recorded in prefs and surfaced via
+ * /rvd/status; the old version keeps running.
  */
 class UpdateCheckReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         thread {
             try {
-                val info = UpdateManager.fetchLatest() ?: return@thread
-                UpdateManager.markChecked(context)
-                if (UpdateManager.isNewer(info.version, UpdateManager.installedVersion(context))) {
-                    UpdateManager.setPending(context, info.version)
-                }
-            } catch (e: Exception) {
+                UpdateManager.autoUpdate(context, force = false, userInitiated = false)
+            } catch (_: Exception) {
                 // Silent — the next launch/manual check will retry.
             }
         }

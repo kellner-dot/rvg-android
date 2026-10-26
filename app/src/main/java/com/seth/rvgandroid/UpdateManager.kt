@@ -2,14 +2,13 @@ package com.seth.rvgandroid
 
 import android.app.Activity
 import android.app.AlarmManager
-import android.app.AlertDialog
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
+import android.content.pm.PackageInstaller
+import android.content.pm.PackageManager
 import android.os.SystemClock
 import android.widget.Toast
-import androidx.core.content.FileProvider
 import kotlin.concurrent.thread
 import org.json.JSONObject
 import java.io.File
@@ -18,25 +17,57 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Self-update checker. MIRRORED in KaviGuard Android (same file, only
- * GITHUB_REPO differs) so both apps stay on one consistent design.
+ * Self-update checker + installer (v1.2.0 upgrade of the v1.0.9 design).
  *
- * Source of truth: GitHub releases on the app's public repo.
- *   GET https://api.github.com/repos/<owner>/<repo>/releases/latest
- * No secrets, no auth, no extra servers — the APK rides as a release asset.
+ * What changed from v1.0.9, and why:
+ *  - BEFORE: check version -> in-app dialog asks -> download to
+ *    externalCacheDir -> ACTION_VIEW intent -> the user taps Install.
+ *    The old code's own comment states the platform reality honestly:
+ *    "a sideloaded user app cannot silently update itself."
+ *  - NOW (Seth's word: "make it auto update"): a newer release is
+ *    downloaded AUTOMATICALLY (no in-app ask dialog), verified, and
+ *    installed through a PackageInstaller session. A session install
+ *    is an UPDATE, not an uninstall: token, settings, and app-private
+ *    state are preserved, there is no dark period, and no token
+ *    re-registration. The metered-data caution (metadata-only daily
+ *    checks, no auto-download) is superseded by Seth's auto-update word.
  *
- * Android reality: a sideloaded user app cannot silently update itself.
- * Best achievable UX: check version -> download APK in background ->
- * fire the system install intent -> the user taps "Install" once.
- * PackageManager enforces same-signer, so a tampered APK can't install.
+ * HONEST LIMIT, stated plainly (do not promise past it): this build
+ * deliberately does NOT set SessionParams.requireUserAction to
+ * NOT_REQUIRED. That flag is honored only for system installers and
+ * INSTALL_PACKAGES holders; setting it from a sideloaded app risks a
+ * SecurityException and buys nothing. On Android 16, for a non-system
+ * installer, the platform may still surface its confirmation dialog
+ * before the session installs. The install pilot MUST observe that
+ * dialog: if it is RVG-tappable, updates are effectively
+ * self-installed; if it is finger-only, one Install tap per update
+ * remains (still a large saving versus uninstall + reinstall +
+ * token re-register). Until the pilot observes it, "auto update"
+ * means automatic check + download + verify + staged session — not
+ * a proven zero-tap install.
+ *
+ * Gates (all enforced before any install is attempted, see
+ * UpdateVerify): source host allowlist, signer-certificate equality
+ * with the installed app, strictly-greater versionCode. Any gate
+ * failure refuses the install, records the reason in prefs (visible
+ * via /rvd/status), deletes the APK, and leaves the old version
+ * running — never bricks the control channel.
+ *
+ * Source of truth: GitHub releases on kellner-dot/rvg-android ONLY.
+ *   GET https://api.github.com/repos/kellner-dot/rvg-android/releases/latest
+ * No secrets, no auth, no Play, no mirrors, no other source.
  *
  * Triggers:
- *  - onAppLaunch(): call from MainActivity.onCreate. Shows a pending-update
- *    dialog if the daily check found one; otherwise checks if >24h elapsed.
- *  - checkNow(): manual "Check for updates" button.
- *  - scheduleDaily(): AlarmManager once-daily check (version metadata only,
- *    ~2KB — no auto-download, Seth is on metered data). Re-scheduled on
- *    every launch and on BOOT_COMPLETED.
+ *  - onAppLaunch(): schedule daily check; auto-update if a pending
+ *    newer version exists (and is not error-skipped) or the daily
+ *    check is stale.
+ *  - checkNow(): manual "Check for updates" button (forces retry
+ *    past a recorded error).
+ *  - scheduleDaily(): AlarmManager once-daily check; the receiver
+ *    now auto-updates too (no activity needed for the session path).
+ *  - Every transition is recorded in prefs and surfaced through
+ *    /rvd/status (updateAvailable, updateVersion, updateError,
+ *    lastUpdateCheckMs, lastUpdateResult).
  */
 object UpdateManager {
 
@@ -47,8 +78,12 @@ object UpdateManager {
     private const val PREFS = "self_update"
     private const val KEY_LAST_CHECK = "last_check_ms"
     private const val KEY_PENDING_VERSION = "pending_version"
+    private const val KEY_UPDATE_ERROR_VERSION = "update_error_version"
+    private const val KEY_UPDATE_ERROR_MSG = "update_error_msg"
+    private const val KEY_LAST_RESULT = "last_update_result"
     private const val CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000L
     private const val APK_NAME = "update.apk"
+    private const val MAX_REDIRECTS = 5
 
     data class ReleaseInfo(val version: String, val apkUrl: String)
 
@@ -56,24 +91,20 @@ object UpdateManager {
     fun onAppLaunch(activity: Activity) {
         scheduleDaily(activity)
         val pending = getPending(activity)
-        if (pending != null && isNewer(pending, installedVersion(activity))) {
-            askToUpdate(activity, pending, null)
-            return
-        }
-        val last = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getLong(KEY_LAST_CHECK, 0)
-        if (System.currentTimeMillis() - last > CHECK_INTERVAL_MS) {
-            checkInBackground(activity, activity, userInitiated = false)
+        val last = lastCheckMs(activity)
+        val stale = System.currentTimeMillis() - last > CHECK_INTERVAL_MS
+        if ((pending != null && isNewer(pending, installedVersion(activity))) || stale) {
+            autoUpdate(activity, force = false, userInitiated = false)
         }
     }
 
-    /** Manual "Check for updates" button. */
+    /** Manual "Check for updates" button. Forces retry past a recorded error. */
     fun checkNow(activity: Activity) {
         Toast.makeText(activity, "Checking for updates…", Toast.LENGTH_SHORT).show()
-        checkInBackground(activity, activity, userInitiated = true)
+        autoUpdate(activity, force = true, userInitiated = true)
     }
 
-    /** Once-daily version check. Version metadata only — never auto-downloads. */
+    /** Once-daily version check + auto-update (receiver path). */
     fun scheduleDaily(context: Context) {
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val pi = PendingIntent.getBroadcast(
@@ -89,83 +120,191 @@ object UpdateManager {
         )
     }
 
-    internal fun checkInBackground(
-        context: Context,
-        activity: Activity?,
-        userInitiated: Boolean
-    ) {
+    /**
+     * Full auto-update flow on a background thread: check -> (skip if
+     * errored and not forced) -> download to the PRIVATE files dir ->
+     * verify (source, signer, versionCode) -> PackageInstaller session.
+     * On any failure: record the reason, delete the APK, keep the old
+     * version running. Never throws to the caller.
+     */
+    fun autoUpdate(context: Context, force: Boolean, userInitiated: Boolean) {
         thread {
             try {
                 val info = fetchLatest()
                 markChecked(context)
                 if (info == null) {
-                    if (userInitiated) toastOnUi(activity, "Update check failed — try again later.")
+                    recordUpdateError(context, null, "update check failed")
+                    if (userInitiated) toastOnUi(context, "Update check failed — try again later.")
                     return@thread
                 }
-                if (isNewer(info.version, installedVersion(context))) {
-                    setPending(context, info.version)
-                    if (activity != null && !activity.isFinishing) {
-                        activity.runOnUiThread { askToUpdate(activity, info.version, info.apkUrl) }
-                    }
-                } else {
+                if (!isNewer(info.version, installedVersion(context))) {
                     clearPending(context)
+                    clearUpdateError(context)
                     if (userInitiated) {
-                        toastOnUi(activity, "You're on the latest version (v${installedVersion(context)}).")
+                        toastOnUi(context, "You're on the latest version (v${installedVersion(context)}).")
                     }
+                    return@thread
+                }
+                if (!force && getErrorVersion(context) == info.version) {
+                    // A previous attempt at this exact version failed;
+                    // wait for a new version or a manual forced retry.
+                    return@thread
+                }
+                setPending(context, info.version)
+                val apk = downloadApkPrivate(context, info.apkUrl)
+                if (apk == null) {
+                    recordUpdateError(context, info.version, "download failed or source refused")
+                    if (userInitiated) toastOnUi(context, "Download failed — try again later.")
+                    return@thread
+                }
+                val verified = verifyApk(context, apk)
+                if (verified != null) {
+                    apk.delete()
+                    recordUpdateError(context, info.version, verified)
+                    if (userInitiated) toastOnUi(context, "Update refused: $verified")
+                    return@thread
+                }
+                val previous = installedVersion(context)
+                if (installViaSession(context, apk, info.version, previous)) {
+                    clearPending(context)
+                    recordInstallResult(context, "install started for ${info.version} (was $previous) — awaiting system confirmation")
+                    if (userInitiated) toastOnUi(context, "Installing update v${info.version}…")
+                } else {
+                    apk.delete()
+                    recordUpdateError(context, info.version, "session install failed")
+                    if (userInitiated) toastOnUi(context, "Install failed — old version still running.")
                 }
             } catch (e: Exception) {
-                if (userInitiated) toastOnUi(activity, "Update check failed: ${e.message}")
+                recordUpdateError(context, null, "auto-update error: ${e.message}")
+                if (userInitiated) toastOnUi(context, "Update failed: ${e.message}")
             }
         }
     }
 
-    private fun askToUpdate(activity: Activity, version: String, apkUrl: String?) {
-        AlertDialog.Builder(activity)
-            .setTitle("Update available")
-            .setMessage("Version $version is ready.\n\nDownload and install now? You'll tap \"Install\" once on the system screen.")
-            .setPositiveButton("Download & Install") { _, _ -> downloadAndInstall(activity, version, apkUrl) }
-            .setNegativeButton("Later", null)
-            .show()
-    }
+    // ---------- install ----------
 
-    private fun downloadAndInstall(activity: Activity, version: String, apkUrl: String?) {
-        val progress = AlertDialog.Builder(activity)
-            .setTitle("Downloading v$version…")
-            .setMessage("Please wait.")
-            .setCancelable(false)
-            .show()
-        thread {
-            try {
-                val url = apkUrl ?: fetchLatest()?.apkUrl
-                val apk = url?.let { downloadApk(activity, it) }
-                activity.runOnUiThread {
-                    progress.dismiss()
-                    if (apk != null && apk.exists()) {
-                        clearPending(activity)
-                        fireInstall(activity, apk)
-                    } else {
-                        Toast.makeText(activity, "Download failed — try again later.", Toast.LENGTH_LONG).show()
-                    }
+    /** Private files dir — never shared Downloads (unreliable there) and
+     *  never the uninstall-wiped inbox. */
+    private fun updateDir(context: Context): File =
+        File(context.filesDir, "update").apply { mkdirs() }
+
+    /**
+     * Downloads with manual redirect following so EVERY hop's host is
+     * validated against the allowlist before the body is read.
+     * Returns the file, or null on any failure/refusal.
+     */
+    private fun downloadApkPrivate(context: Context, startUrl: String): File? {
+        var url = URL(startUrl)
+        if (!UpdateVerify.allowedAssetHost(url.host)) return null
+        var conn: HttpURLConnection? = null
+        try {
+            for (hop in 0..MAX_REDIRECTS) {
+                conn = (url.openConnection() as HttpURLConnection).apply {
+                    instanceFollowRedirects = false
+                    connectTimeout = 20000
+                    readTimeout = 120000
+                    setRequestProperty("User-Agent", "KaviSelfUpdate/1.0")
                 }
-            } catch (e: Exception) {
-                activity.runOnUiThread {
-                    progress.dismiss()
-                    Toast.makeText(activity, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                val code = conn.responseCode
+                if (code in 301..308) {
+                    val loc = conn.getHeaderField("Location") ?: return null
+                    conn.disconnect()
+                    url = URL(url, loc)
+                    if (!UpdateVerify.allowedAssetHost(url.host)) return null
+                    if (hop == MAX_REDIRECTS) return null
+                    continue
                 }
+                if (code != 200) return null
+                val out = File(updateDir(context), APK_NAME)
+                conn.inputStream.use { inp ->
+                    FileOutputStream(out).use { inp.copyTo(it) }
+                }
+                return if (out.length() > 0) out else null
             }
+            return null
+        } catch (_: Exception) {
+            return null
+        } finally {
+            try { conn?.disconnect() } catch (_: Exception) {}
         }
     }
 
-    private fun fireInstall(activity: Activity, apk: File) {
-        val uri: Uri = FileProvider.getUriForFile(
-            activity, "${activity.packageName}.fileprovider", apk
-        )
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    /**
+     * Verifies a downloaded APK. Returns null when it passes, or a
+     * human-readable refusal reason when it must not be installed.
+     */
+    private fun verifyApk(context: Context, apk: File): String? {
+        val pm = context.packageManager
+        val archive = try {
+            pm.getPackageArchiveInfo(apk.absolutePath, PackageManager.GET_SIGNING_CERTIFICATES)
+        } catch (_: Exception) {
+            null
+        } ?: return "unparseable APK"
+        if (archive.packageName != context.packageName) return "wrong package: ${archive.packageName}"
+        @Suppress("DEPRECATION")
+        val installed = try {
+            pm.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+        } catch (_: Exception) {
+            null
+        } ?: return "installed package info unavailable"
+        val archiveCerts = archive.signingInfo?.apkContentsSigners
+            ?.map { it.toByteArray() } ?: return "downloaded APK has no signing certificates"
+        val installedCerts = installed.signingInfo?.apkContentsSigners
+            ?.map { it.toByteArray() } ?: return "installed app has no signing certificates"
+        if (!UpdateVerify.signaturesMatch(installedCerts, archiveCerts)) {
+            return "signer mismatch — refusing (would not install as an update)"
         }
-        activity.startActivity(intent)
+        if (!UpdateVerify.isUpgrade(archive.longVersionCode, installed.longVersionCode)) {
+            return "not an upgrade (downloaded ${archive.longVersionCode} <= installed ${installed.longVersionCode})"
+        }
+        return null
+    }
+
+    /**
+     * Installs via a PackageInstaller session (an UPDATE: state
+     * preserved, no uninstall, no token re-register). Returns true
+     * when the session committed; the result callback lands in
+     * UpdateInstallReceiver. The temp APK is deleted by the caller
+     * after commit — the session already owns the bytes.
+     */
+    private fun installViaSession(
+        context: Context,
+        apk: File,
+        version: String,
+        previous: String
+    ): Boolean {
+        return try {
+            val installer = context.packageManager.packageInstaller
+            val params = PackageInstaller.SessionParams(
+                PackageInstaller.SessionParams.MODE_FULL_INSTALL
+            )
+            params.setAppPackageName(context.packageName)
+            params.setSize(apk.length())
+            // Deliberately NOT setting requireUserAction NOT_REQUIRED:
+            // it is honored only for system installers / INSTALL_PACKAGES
+            // holders. The platform confirmation dialog (if any) is the
+            // pilot's observation, not something this build pretends away.
+            val sessionId = installer.createSession(params)
+            installer.openSession(sessionId).use { session ->
+                session.openWrite("update", 0, apk.length()).use { out ->
+                    apk.inputStream().use { it.copyTo(out) }
+                    session.fsync(out)
+                }
+                val intent = Intent(context, UpdateInstallReceiver::class.java).apply {
+                    putExtra("attempted_version", version)
+                    putExtra("previous_version", previous)
+                }
+                val pi = PendingIntent.getBroadcast(
+                    context, sessionId, intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                session.commit(pi.intentSender)
+            }
+            apk.delete()
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     // ---------- network ----------
@@ -198,26 +337,6 @@ object UpdateManager {
         }
     }
 
-    private fun downloadApk(context: Context, url: String): File? {
-        val dir = context.externalCacheDir ?: return null
-        val out = File(dir, APK_NAME)
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 20000
-            readTimeout = 120000
-            setRequestProperty("User-Agent", "KaviSelfUpdate/1.0")
-            instanceFollowRedirects = true
-        }
-        try {
-            if (conn.responseCode != 200) return null
-            conn.inputStream.use { inp ->
-                FileOutputStream(out).use { inp.copyTo(it) }
-            }
-            return if (out.length() > 0) out else null
-        } finally {
-            conn.disconnect()
-        }
-    }
-
     // ---------- version compare ----------
 
     /** Returns >0 if a is newer than b. */
@@ -240,12 +359,31 @@ object UpdateManager {
         return pi.versionName ?: "0.0.0"
     }
 
-    // ---------- prefs ----------
+    // ---------- prefs / status reporting ----------
 
     internal fun markChecked(context: Context) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
     }
+
+    fun updateAvailable(context: Context): Boolean {
+        val pending = getPending(context) ?: return false
+        return isNewer(pending, installedVersion(context))
+    }
+
+    fun updateVersion(context: Context): String? = getPending(context)
+
+    fun lastUpdateError(context: Context): String? =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_UPDATE_ERROR_MSG, null)
+
+    fun lastCheckMs(context: Context): Long =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_LAST_CHECK, 0)
+
+    fun lastUpdateResult(context: Context): String? =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_LAST_RESULT, null)
 
     private fun getPending(context: Context): String? =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -261,9 +399,36 @@ object UpdateManager {
             .remove(KEY_PENDING_VERSION).apply()
     }
 
-    private fun toastOnUi(activity: Activity?, msg: String) {
-        activity?.runOnUiThread {
-            if (!activity.isFinishing) Toast.makeText(activity, msg, Toast.LENGTH_LONG).show()
+    private fun getErrorVersion(context: Context): String? =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_UPDATE_ERROR_VERSION, null)
+
+    internal fun recordUpdateError(context: Context, version: String?, msg: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_UPDATE_ERROR_MSG, msg)
+            .putString(KEY_UPDATE_ERROR_VERSION, version ?: getPending(context))
+            .apply()
+    }
+
+    internal fun clearUpdateError(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .remove(KEY_UPDATE_ERROR_MSG)
+            .remove(KEY_UPDATE_ERROR_VERSION)
+            .apply()
+    }
+
+    internal fun recordInstallResult(context: Context, result: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_LAST_RESULT, result).apply()
+    }
+
+    private fun toastOnUi(context: Context, msg: String) {
+        if (context is Activity) {
+            context.runOnUiThread {
+                if (!context.isFinishing) {
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
 }

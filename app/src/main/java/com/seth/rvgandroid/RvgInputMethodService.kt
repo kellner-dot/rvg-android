@@ -77,6 +77,35 @@ class RvgInputMethodService : InputMethodService() {
             latch.await(15, TimeUnit.SECONDS)
             return ok.get()
         }
+
+        /**
+         * Teardown only (1.3.0): switch AWAY from the RVG keyboard to
+         * the next enabled IME (normally Gboard), via
+         * InputMethodService.switchToNextInputMethod — a method the
+         * IME itself may call with NO system/signature permission.
+         * Returns false when the RVG IME is not the current IME (then
+         * there is nothing to switch away from) or when no next IME
+         * exists. Switching TO the RVG keyboard programmatically is
+         * NOT possible for a normal app (needs WRITE_SECURE_SETTINGS,
+         * system apps only) — setup stays finger-assisted by platform
+         * design, and this method must never be presented as fixing it.
+         */
+        fun switchBack(): Boolean {
+            val ime = instance ?: return false
+            val ok = AtomicBoolean(false)
+            val latch = CountDownLatch(1)
+            Handler(Looper.getMainLooper()).post {
+                try {
+                    ok.set(ime.switchToNextInputMethod(false))
+                } catch (_: Exception) {
+                    ok.set(false)
+                } finally {
+                    latch.countDown()
+                }
+            }
+            latch.await(5, TimeUnit.SECONDS)
+            return ok.get()
+        }
     }
 
     override fun onCreate() {

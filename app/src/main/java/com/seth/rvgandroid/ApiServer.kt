@@ -19,6 +19,28 @@ import java.security.MessageDigest
  *   POST /rvd/input             -> {"tap":[x,y]} | {"swipe":[x1,y1,x2,y2]} |
  *                                  {"key":"home"} | {"type":"text"} |
  *                                  {"keytext":"text"} | {"longpress":[x,y]}
+ *                                  1.2.0: {"nodeclick":[x,y]} | {"nodequery":[x,y]}
+ *                                  1.3.0: {"nodetree":{...}} |
+ *                                  {"nodefind":{"selector":{...},"index":n,"unique":bool}} |
+ *                                  {"nodetap":{"selector":{...},...}} |
+ *                                  {"nodescroll":[x,y,"forward"|"backward"]} |
+ *                                  {"nodescroll":{"selector":{...},"direction":...}} |
+ *                                  {"nodescrolluntil":{"selector":{...},"direction":...,"maxAttempts":n,"container":[x,y]}} |
+ *                                  {"nodewait":{"selector":{...},"timeoutMs":n,"intervalMs":n}} |
+ *                                  {"nodeshow":[x,y]} | {"nodeshow":{"selector":{...}}} |
+ *                                  {"nodesettext":[x,y,"text"]} | {"nodesettext":{"selector":{...},"text":"..."}} |
+ *                                  {"nodelongclick":[x,y]} | {"nodelongclick":{"selector":{...}}} |
+ *                                  {"nodewindows":true} | {"imeswitchback":true}
+ *                                  Selector object fields: text, textExact,
+ *                                  contentDesc, contentDescExact, class, id
+ *                                  (full resource name or suffix after '/'),
+ *                                  clickable, scrollable, editable, checkable,
+ *                                  checked, focused, bounds [l,t,r,b],
+ *                                  contains [x,y]. Never XPath.
+ *   POST /rvd/update            -> {"check":true} runs the service-side
+ *                                  autoUpdate path (same as the daily
+ *                                  alarm); {"force":true} retries past a
+ *                                  recorded error for that version.
  *   Text input: "type" uses ACTION_SET_TEXT on the focused EditText (fast
  *   path) and FALLS BACK to the RVG keyboard IME when the target isn't an
  *   EditText (e.g. Termux's TerminalView). "keytext" goes straight to the
@@ -70,6 +92,7 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
                 req.path == "/rvd/status" && req.method == "GET" -> status()
                 req.path == "/rvd/shot" && req.method == "GET" -> shot(req)
                 req.path == "/rvd/input" && req.method == "POST" -> input(req)
+                req.path == "/rvd/update" && req.method == "POST" -> update(req)
                 req.path == "/rvd/exec" && req.method == "POST" -> exec(req)
                 req.path == "/rvd/download" && req.method == "GET" -> download(req)
                 req.path == "/rvd/upload" && req.method == "POST" -> upload(req)
@@ -120,7 +143,7 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
         ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "?"
     } catch (_: Exception) { "?" }
 
-    /** Node info JSON for nodeclick/nodequery responses. */
+    /** Node info JSON for nodeclick/nodequery responses (1.3.0: full fields). */
     private fun nodeJson(n: NodeSelector.Candidate): JSONObject =
         JSONObject()
             .put("class", n.className)
@@ -129,6 +152,71 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
                 .put(n.bounds.right).put(n.bounds.bottom))
             .put("clickable", n.clickable)
             .put("depth", n.depth)
+            .put("text", n.text ?: JSONObject.NULL)
+            .put("contentDesc", n.contentDesc ?: JSONObject.NULL)
+            .put("scrollable", n.scrollable)
+            .put("checkable", n.checkable)
+            .put("checked", n.checked)
+            .put("editable", n.editable)
+            .put("focused", n.focused)
+            .put("resourceId", n.resourceId ?: JSONObject.NULL)
+
+    /** Parse a selector object: text, contentDesc, class, id, boolean flags, bounds, contains. */
+    private fun parseSelector(o: JSONObject): NodeSelector.Selector {
+        fun optBool(key: String): Boolean? =
+            if (o.has(key) && !o.isNull(key)) o.getBoolean(key) else null
+        fun optStr(key: String): String? =
+            if (o.has(key) && !o.isNull(key)) o.getString(key) else null
+        val bounds = if (o.has("bounds") && !o.isNull("bounds")) {
+            val b = o.getJSONArray("bounds")
+            NodeSelector.Bounds(b.getInt(0), b.getInt(1), b.getInt(2), b.getInt(3))
+        } else null
+        val contains = if (o.has("contains") && !o.isNull("contains")) {
+            val p = o.getJSONArray("contains")
+            Pair(p.getInt(0), p.getInt(1))
+        } else null
+        return NodeSelector.Selector(
+            text = optStr("text"),
+            textExact = o.optBoolean("textExact", false),
+            contentDesc = optStr("contentDesc"),
+            contentDescExact = o.optBoolean("contentDescExact", false),
+            className = optStr("class"),
+            resourceId = optStr("id"),
+            clickable = optBool("clickable"),
+            scrollable = optBool("scrollable"),
+            editable = optBool("editable"),
+            checkable = optBool("checkable"),
+            checked = optBool("checked"),
+            focused = optBool("focused"),
+            bounds = bounds,
+            containsPoint = contains
+        )
+    }
+
+    /** Selector + index/unique options shared by nodefind/nodetap. */
+    private fun selectorArgs(o: JSONObject): Triple<NodeSelector.Selector, Int, Boolean> {
+        val sel = parseSelector(o.getJSONObject("selector"))
+        val index = o.optInt("index", 0)
+        val unique = o.optBoolean("unique", false)
+        return Triple(sel, index, unique)
+    }
+
+    /** Direction string: "backward" or anything else (forward). */
+    private fun isBackward(o: JSONObject): Boolean =
+        o.optString("direction", "forward").lowercase() == "backward"
+
+    /** Response for a node action: ok + node + error string on failure. */
+    private fun nodeActionResponse(
+        node: NodeSelector.Candidate?,
+        performed: Boolean,
+        noNodeError: String
+    ): HttpServer.Response {
+        val o = JSONObject().put("ok", node != null && performed)
+        if (node != null) o.put("node", nodeJson(node))
+        if (node == null) o.put("error", noNodeError)
+        else if (!performed) o.put("error", "node action not performed")
+        return HttpServer.Response.json(o.toString())
+    }
 
     private fun shot(req: HttpServer.Request): HttpServer.Response {
         val svc = RvgAccessibilityService.instance
@@ -159,6 +247,174 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
             val o = JSONObject().put("ok", true).put("found", n != null)
             if (n != null) o.put("node", nodeJson(n)) else o.put("node", JSONObject.NULL)
             return HttpServer.Response.json(o.toString())
+        }
+        // ----- 1.3.0 node shapes (selector language is a plain JSON
+        // object — see parseSelector; never XPath) -----
+        if (j.has("nodetree")) {
+            val p = if (j.opt("nodetree") is JSONObject) j.getJSONObject("nodetree") else JSONObject()
+            val maxNodes = p.optInt("maxNodes", 2000).coerceIn(1, 20000)
+            val maxDepth = p.optInt("maxDepth", 50).coerceIn(1, 100)
+            val interactiveOnly = p.optString("filter", "all") == "interactive"
+            val dump = svc.dumpTree(maxNodes, maxDepth, interactiveOnly)
+                ?: return HttpServer.Response.jsonErr(503, "no active window")
+            val arr = org.json.JSONArray()
+            for (i in dump.nodes.indices) {
+                val n = dump.nodes[i]
+                arr.put(nodeJson(n)
+                    .put("childCount", dump.childCounts[i]))
+            }
+            val o = JSONObject()
+                .put("ok", true)
+                .put("nodes", arr)
+                .put("nodeCount", dump.nodes.size)
+                .put("totalVisited", dump.totalVisited)
+                .put("truncated", dump.truncated)
+            return HttpServer.Response.json(o.toString())
+        }
+        if (j.has("nodefind")) {
+            val (sel, index, unique) = selectorArgs(j.getJSONObject("nodefind"))
+            val found = svc.findBySelector(sel, index)
+                ?: return HttpServer.Response.jsonErr(503, "no active window")
+            val (node, count) = found
+            if (unique && count != 1) {
+                return HttpServer.Response.json(
+                    JSONObject().put("ok", false).put("found", false)
+                        .put("matchCount", count)
+                        .put("error", "selector must match exactly one node (matched $count)")
+                        .toString()
+                )
+            }
+            val o = JSONObject().put("ok", true).put("found", node != null)
+                .put("matchCount", count)
+            if (node != null) o.put("node", nodeJson(node))
+            else o.put("node", JSONObject.NULL)
+            return HttpServer.Response.json(o.toString())
+        }
+        if (j.has("nodetap")) {
+            val (sel, index, unique) = selectorArgs(j.getJSONObject("nodetap"))
+            val pick = svc.clickBySelector(sel, index)
+            if (unique && pick.matchCount != 1) {
+                return HttpServer.Response.json(
+                    JSONObject().put("ok", false)
+                        .put("matchCount", pick.matchCount)
+                        .put("error", "selector must match exactly one node (matched ${pick.matchCount})")
+                        .toString()
+                )
+            }
+            return nodeActionResponse(pick.node, pick.performed, "no node")
+        }
+        if (j.has("nodescroll")) {
+            val v = j.get("nodescroll")
+            val backward: Boolean
+            val pick: RvgAccessibilityService.SelectorPick
+            if (v is org.json.JSONArray) {
+                val a = v
+                backward = a.length() > 2 && a.getString(2).lowercase() == "backward"
+                pick = svc.scrollNodeAtPoint(a.getInt(0), a.getInt(1), backward)
+            } else {
+                val o = j.getJSONObject("nodescroll")
+                backward = isBackward(o)
+                pick = svc.scrollNodeBySelector(parseSelector(o.getJSONObject("selector")), backward)
+            }
+            return nodeActionResponse(pick.node, pick.performed, "no scrollable node")
+        }
+        if (j.has("nodescrolluntil")) {
+            val o = j.getJSONObject("nodescrolluntil")
+            val sel = parseSelector(o.getJSONObject("selector"))
+            val backward = isBackward(o)
+            val maxAttempts = o.optInt("maxAttempts", 10).coerceIn(0, 50)
+            val container = if (o.has("container") && !o.isNull("container")) {
+                val c = o.getJSONArray("container")
+                Pair(c.getInt(0), c.getInt(1))
+            } else null
+            val r = svc.scrollUntilVisible(sel, backward, maxAttempts, container)
+            val out = JSONObject().put("ok", r.found).put("found", r.found)
+                .put("scrolls", r.scrolls)
+            if (r.node != null) out.put("node", nodeJson(r.node))
+            else out.put("node", JSONObject.NULL)
+            return HttpServer.Response.json(out.toString())
+        }
+        if (j.has("nodewait")) {
+            val o = j.getJSONObject("nodewait")
+            val sel = parseSelector(o.getJSONObject("selector"))
+            val timeout = o.optLong("timeoutMs", 10000).coerceIn(0, 120000)
+            val interval = o.optLong("intervalMs", 500).coerceIn(100, 10000)
+            val r = svc.waitForElement(sel, timeout, interval)
+            val out = JSONObject().put("ok", r.found).put("found", r.found)
+                .put("attempts", r.attempts).put("elapsedMs", r.elapsedMs)
+            if (r.node != null) out.put("node", nodeJson(r.node))
+            else out.put("node", JSONObject.NULL)
+            return HttpServer.Response.json(out.toString())
+        }
+        if (j.has("nodeshow")) {
+            val v = j.get("nodeshow")
+            val pick: RvgAccessibilityService.SelectorPick
+            if (v is org.json.JSONArray) {
+                val a = v
+                pick = svc.showNodeAtPoint(a.getInt(0), a.getInt(1))
+            } else {
+                val o = j.getJSONObject("nodeshow")
+                pick = svc.showNodeBySelector(parseSelector(o.getJSONObject("selector")))
+            }
+            return nodeActionResponse(pick.node, pick.performed, "no node")
+        }
+        if (j.has("nodesettext")) {
+            val v = j.get("nodesettext")
+            val pick: RvgAccessibilityService.SelectorPick
+            var notEditable = false
+            if (v is org.json.JSONArray) {
+                val a = v
+                pick = svc.setTextAtPoint(a.getInt(0), a.getInt(1), a.getString(2))
+            } else {
+                val o = j.getJSONObject("nodesettext")
+                val sel = parseSelector(o.getJSONObject("selector"))
+                pick = svc.setTextBySelector(sel, o.getString("text"))
+                if (pick.node == null && pick.matchCount > 0) notEditable = true
+            }
+            if (notEditable) {
+                return HttpServer.Response.json(
+                    JSONObject().put("ok", false)
+                        .put("error", "matched node not editable").toString()
+                )
+            }
+            return nodeActionResponse(pick.node, pick.performed, "no editable node")
+        }
+        if (j.has("nodelongclick")) {
+            val v = j.get("nodelongclick")
+            val pick: RvgAccessibilityService.SelectorPick
+            if (v is org.json.JSONArray) {
+                val a = v
+                pick = svc.longClickAtPoint(a.getInt(0), a.getInt(1))
+            } else {
+                val o = j.getJSONObject("nodelongclick")
+                pick = svc.longClickBySelector(parseSelector(o.getJSONObject("selector")))
+            }
+            return nodeActionResponse(pick.node, pick.performed, "no node")
+        }
+        if (j.has("nodewindows")) {
+            val arr = org.json.JSONArray()
+            for (w in svc.windowsWalk()) {
+                arr.put(JSONObject()
+                    .put("id", w.id).put("type", w.type)
+                    .put("focused", w.focused).put("active", w.active)
+                    .put("bounds", org.json.JSONArray()
+                        .put(w.bounds.left).put(w.bounds.top)
+                        .put(w.bounds.right).put(w.bounds.bottom))
+                    .put("rootClass", w.rootClass ?: JSONObject.NULL)
+                    .put("nodeCount", w.nodeCount)
+                    .put("truncated", w.truncated))
+            }
+            return HttpServer.Response.json(
+                JSONObject().put("ok", true).put("windows", arr).toString()
+            )
+        }
+        if (j.has("imeswitchback")) {
+            // Teardown only: switch AWAY from the RVG keyboard to the
+            // next IME (normally Gboard). Switching TO RVG still needs
+            // the user — no system permission exists for a normal app
+            // to select itself. False when RVG IME is not active.
+            val ok = RvgInputMethodService.switchBack()
+            return HttpServer.Response.json("{\"ok\":$ok}")
         }
         val ok = when {
             j.has("tap") -> {
@@ -269,6 +525,31 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
         out.put("stderr", "")
         out.put("exitCode", 0)
         return HttpServer.Response.json(out.toString())
+    }
+
+    /**
+     * Remote self-update check trigger (1.3.0).
+     *
+     * Runs the SAME service-side autoUpdate path the daily alarm runs
+     * (UpdateCheckReceiver -> autoUpdate): check the releases API, and
+     * when a newer release exists, download + verify + stage a
+     * PackageInstaller session. This is NOT a metadata-only check: if
+     * a genuine newer release exists, the full existing auto-update
+     * flow runs, exactly as the daily alarm would run it. Call it only
+     * when an update is actually wanted. Never faked: no release, no
+     * install — the status fields simply record the check.
+     */
+    private fun update(req: HttpServer.Request): HttpServer.Response {
+        val j = JSONObject(String(req.body, Charsets.UTF_8))
+        if (!j.optBoolean("check", false)) {
+            return HttpServer.Response.jsonErr(400, "unknown update action (want {\"check\":true})")
+        }
+        val force = j.optBoolean("force", false)
+        UpdateManager.autoUpdate(ctx, force, userInitiated = false)
+        return HttpServer.Response.json(
+            JSONObject().put("ok", true).put("check", "started")
+                .put("force", force).toString()
+        )
     }
 
     /** File download scoped to app-private dirs + public Downloads/Pictures. */

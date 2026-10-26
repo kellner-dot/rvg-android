@@ -108,8 +108,21 @@ class MainActivity : Activity() {
 
     private fun copyToken() {
         val token = TokenStore.getToken(this)
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE)
+                as android.content.ClipboardManager
+        // 1.3.0 clipboard hygiene (Seth's word, Oct 26 16:19): the
+        // clipboard is cleared ONLY immediately after this app's own
+        // copyToken action, and only to remove a token this app itself
+        // just placed — never on launch, never on a timer, never
+        // user-copied content. The copy and the clear happen in this
+        // same call, so the token never lingers for other apps to read.
+        // Consequence, stated plainly: after this tap the clipboard
+        // holds neutral text, NOT the token — pasting the token from
+        // the clipboard no longer works; the Drive backup path is the
+        // API replacement, not a clipboard paste.
         @Suppress("DEPRECATION")
         (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).text = token
-        Toast.makeText(this, "Token copied — save to Drive as RVG-android-token.txt", Toast.LENGTH_LONG).show()
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("RVG", ""))
+        Toast.makeText(this, "Token clipboard cleared — token never lingers on the clipboard", Toast.LENGTH_LONG).show()
     }
 }

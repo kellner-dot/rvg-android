@@ -1,0 +1,81 @@
+# Gitea Actions translation of .github/workflows/build-apk.yml.
+# STAGING ONLY — pushed to ci/gitea-actions-staging, never main.
+# PREREQUISITES before this can run (all gaps, none done in this run):
+#   1. A Gitea Actions runner registered on the instance with the
+#      `ubuntu-latest` label (zero runners registered as of 2026-10-27).
+#   2. A `GITEA_TOKEN` repository secret (PAT with write access to
+#      repository releases) for the publish step.
+#   3. Verify at runner-registration time that `actions/checkout@v4`
+#      resolves from this runner (Gitea fetches actions from its
+#      configured source); if not, mirror checkout into this instance.
+#   4. `$GITHUB_ENV` / `$GITHUB_PATH` file commands are supported by
+#      Gitea's runner for GitHub compatibility; re-verify on first run.
+# The GitHub original is KEPT untouched: GitHub is the backup mirror
+# if the account is reinstated.
+name: Build APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq openjdk-17-jdk unzip wget >/dev/null
+
+      - name: Install Android SDK
+        run: |
+          mkdir -p "$HOME/android-sdk/cmdline-tools"
+          cd "$HOME/android-sdk"
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
+          unzip -q cmdtools.zip -d cmdline-tools
+          mv cmdline-tools/cmdline-tools cmdline-tools/latest
+          rm cmdtools.zip
+          export ANDROID_HOME="$HOME/android-sdk"
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --licenses >/dev/null 2>&1
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_HOME=$HOME/android-sdk" >> "$GITHUB_ENV"
+          echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$HOME/android-sdk/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Build debug APK
+        run: chmod +x gradlew && ./gradlew :app:assembleDebug
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk "rvg-android-${{ gitea.ref_name }}.apk"
+
+      - name: Publish release
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          set -e
+          TAG="${{ gitea.ref_name }}"
+          REPO="${{ gitea.repository }}"
+          API="${{ gitea.server_url }}/api/v1"
+          APK="rvg-android-${TAG}.apk"
+          # Reuse the release if the tag push re-runs; create it otherwise.
+          CODE=$(curl -s -o /tmp/rel.json -w "%{http_code}" \
+            -H "Authorization: token $GITEA_TOKEN" \
+            "$API/repos/$REPO/releases/tags/$TAG")
+          if [ "$CODE" = "200" ]; then
+            REL_ID=$(python3 -c "import json;print(json.load(open('/tmp/rel.json'))['id'])")
+          else
+            REL_ID=$(curl -s -X POST "$API/repos/$REPO/releases" \
+              -H "Authorization: token $GITEA_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"tag_name\":\"$TAG\",\"name\":\"RVG Android $TAG\",\"draft\":false,\"prerelease\":false}" \
+              | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+          fi
+          curl -s -o /dev/null -w "asset upload http=%{http_code}\n" -X POST \
+            "$API/repos/$REPO/releases/$REL_ID/assets?name=$APK" \
+            -H "Authorization: token $GITEA_TOKEN" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary "@$APK"

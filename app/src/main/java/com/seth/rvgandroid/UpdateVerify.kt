@@ -5,10 +5,11 @@ package com.seth.rvgandroid
  * unit-testable on the JVM without a device.
  *
  * Three gates, all must pass before any install is attempted:
- *  1. Source: the APK URL's host must be a GitHub release host. The
- *     release lookup itself is pinned to api.github.com for
- *     kellner-dot/rvg-android, but release ASSETS are never served
- *     from api.github.com — so it is NOT an allowed asset host.
+ *  1. Source: the APK URL's host must be a Gitea release host. The
+ *     release lookup itself is pinned to the Gitea releases API for
+ *     kellner-dot/rvg-android (tailnet host), but release ASSETS are
+ *     served from the tailnet host itself — api.github.com is NOT an
+ *     allowed asset host and never was.
  *  2. Signer: the downloaded APK's signing certificates must equal
  *     the installed app's, as sets (order-insensitive). This is what
  *     makes the update an UPDATE: Android refuses to install over a
@@ -20,7 +21,8 @@ object UpdateVerify {
 
     private val ALLOWED_ASSET_HOSTS = setOf(
         "github.com",
-        "objects.githubusercontent.com"
+        "objects.githubusercontent.com",
+        "kavivpn.tail1cffd9.ts.net"
     )
 
     fun allowedAssetHost(host: String): Boolean =

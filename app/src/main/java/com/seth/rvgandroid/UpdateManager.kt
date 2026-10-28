@@ -53,8 +53,10 @@ import java.net.URL
  * via /rvd/status), deletes the APK, and leaves the old version
  * running — never bricks the control channel.
  *
- * Source of truth: GitHub releases on kellner-dot/rvg-android ONLY.
- *   GET https://api.github.com/repos/kellner-dot/rvg-android/releases/latest
+ * Source of truth: Gitea releases on kellner-dot/rvg-android ONLY
+ * (tailnet host; anonymous read, no secrets, no auth — the repo must
+ * be anonymously readable or the check fails soft, as it does today).
+ *   GET https://kavivpn.tail1cffd9.ts.net/api/v1/repos/kellner-dot/rvg-android/releases/latest
  * No secrets, no auth, no Play, no mirrors, no other source.
  *
  * Triggers:
@@ -310,7 +312,7 @@ object UpdateManager {
     // ---------- network ----------
 
     internal fun fetchLatest(): ReleaseInfo? {
-        val url = URL("https://api.github.com/repos/$GITHUB_REPO/releases/latest")
+        val url = URL("https://kavivpn.tail1cffd9.ts.net/api/v1/repos/$GITHUB_REPO/releases/latest")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 15000
             readTimeout = 15000

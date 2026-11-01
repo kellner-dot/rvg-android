@@ -1,7 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 1.3.2: event types were typeAllMask. The service processes NO events
+     (empty onAccessibilityEvent; all work is pull-based via
+     rootInActiveWindow), so subscribing to the content-changed flood only
+     loads the system's event delivery (the burst suspected of dropping
+     the binding. Window state changes are the only type kept. Flags below
+     are untouched: they govern tree retrieval, not event delivery. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/accessibility_description"
-    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows|flagReportViewIds"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:notificationTimeout="50"

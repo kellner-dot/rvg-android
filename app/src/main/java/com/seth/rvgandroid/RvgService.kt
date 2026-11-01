@@ -34,6 +34,51 @@ class RvgService : Service() {
 
     private var http: HttpServer? = null
 
+    // Binding watchdog (1.3.2): the system can drop the accessibility
+    // binding while the setting stays ON ("enabled but unbound"). Every 15 s
+    // check for listed-but-unbound and, when the WRITE_SECURE_SETTINGS grant
+    // is held, toggle the setting to force a rebind. Attempts run on a
+    // background thread (the toggle sleeps/polls ~11 s); at most one at a
+    // time; capped per episode by RebindManager. Never runs when the service
+    // is not listed (user turned it off) or the grant is missing.
+    private val watchdogHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    @Volatile
+    private var rebindAttemptRunning = false
+    private val bindingWatchdog = object : Runnable {
+        override fun run() {
+            try {
+                checkBinding()
+            } catch (_: Exception) {
+            }
+            watchdogHandler.postDelayed(this, 15_000)
+        }
+    }
+
+    private fun checkBinding() {
+        if (RvgAccessibilityService.isEnabled()) return
+        if (rebindAttemptRunning) return
+        if (!AndroidSecureSettings.isGrantHeld(this)) return
+        val state = BindingState.from(this)
+        val manager = RebindManager(
+            AndroidSecureSettings(this), state,
+            { RvgAccessibilityService.isEnabled() }
+        )
+        if (!manager.isListed()) return
+        if (state.attemptsInEpisode() >= RebindManager.MAX_ATTEMPTS_PER_EPISODE) return
+        val last = state.lastAttemptMs()
+        if (last > 0 && System.currentTimeMillis() - last < RebindManager.MIN_INTERVAL_MS) return
+        rebindAttemptRunning = true
+        Thread {
+            try {
+                val result = manager.rebind()
+                android.util.Log.i("RVG", "auto-rebind: ${result.outcome} ${result.detail}")
+            } catch (_: Exception) {
+            } finally {
+                rebindAttemptRunning = false
+            }
+        }.start()
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -62,10 +107,13 @@ class RvgService : Service() {
                 stopSelf()
             }
         }
+        watchdogHandler.removeCallbacks(bindingWatchdog)
+        watchdogHandler.postDelayed(bindingWatchdog, 15_000)
         return START_STICKY
     }
 
     override fun onDestroy() {
+        watchdogHandler.removeCallbacks(bindingWatchdog)
         http?.stop()
         http = null
         running = false

@@ -31,11 +31,31 @@ class RvgAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         instance = this
+        try {
+            BindingState.from(this).recordConnected(System.currentTimeMillis())
+        } catch (_: Exception) {
+        }
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         instance = null
+        try {
+            // Record whether the secure setting still listed us: listed-but-
+            // unbound is a system drop (rebindable); absent means the user
+            // turned the service off (never re-enable that).
+            val listed = RebindManager.isListed(AndroidSecureSettings(this))
+            BindingState.from(this).recordUnbind(System.currentTimeMillis(), listed)
+        } catch (_: Exception) {
+        }
         return super.onUnbind(intent)
+    }
+
+    override fun onDestroy() {
+        try {
+            BindingState.from(this).recordDestroy(System.currentTimeMillis())
+        } catch (_: Exception) {
+        }
+        super.onDestroy()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}

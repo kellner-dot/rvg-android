@@ -47,6 +47,12 @@ import java.security.MessageDigest
  *   IME. Single-char {"key":"a"} also uses the IME. The IME path needs
  *   "RVG Keyboard" enabled + selected once in system keyboard settings;
  *   /rvd/status reports "imeEnabled"/"imeActive".
+ *   POST /rvd/rebind          -> attempt a programmatic rebind of the
+ *                                  accessibility service (1.3.2); returns
+ *                                  {"ok","outcome","detail","attemptsInEpisode",
+ *                                  "elapsedMs"}. Refuses when the service is
+ *                                  not listed (user turned it off) or the
+ *                                  WRITE_SECURE_SETTINGS grant is missing.
  *   POST /rvd/exec              -> {"command":"..."} limited command set
  *   GET  /rvd/download?path=    -> file bytes (sandbox-scoped)
  *   POST /rvd/upload            -> multipart file -> inbox dir
@@ -93,6 +99,7 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
                 req.path == "/rvd/shot" && req.method == "GET" -> shot(req)
                 req.path == "/rvd/input" && req.method == "POST" -> input(req)
                 req.path == "/rvd/update" && req.method == "POST" -> update(req)
+                req.path == "/rvd/rebind" && req.method == "POST" -> rebind()
                 req.path == "/rvd/exec" && req.method == "POST" -> exec(req)
                 req.path == "/rvd/download" && req.method == "GET" -> download(req)
                 req.path == "/rvd/upload" && req.method == "POST" -> upload(req)
@@ -125,6 +132,15 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
             .put("uptime", (SystemClock.elapsedRealtime() - startTime) / 1000)
             .put("accessibility", RvgAccessibilityService.isEnabled())
             .put("screenshotReady", RvgAccessibilityService.isEnabled())
+            // Binding telemetry (1.3.2): distinguishes a system drop
+            // (listed but unbound) from never-enabled / user-disabled.
+            .put("accessibilityListed", RebindManager.isListed(AndroidSecureSettings(ctx)))
+            .put("unbindCount", BindingState.from(ctx).unbindCount)
+            .put("lastUnbindAtMs", BindingState.from(ctx).lastUnbindAtMs)
+            .put("lastConnectedAtMs", BindingState.from(ctx).lastConnectedAtMs)
+            .put("rebindAvailable", AndroidSecureSettings.isGrantHeld(ctx))
+            .put("rebindLastOutcome", BindingState.from(ctx).lastOutcome ?: JSONObject.NULL)
+            .put("rebindLastAtMs", BindingState.from(ctx).lastAttemptMs())
             .put("imeEnabled", RvgInputMethodService.isEnabled(ctx))
             .put("imeActive", RvgInputMethodService.isActive(ctx))
             // Self-update reporting (existing status path — every
@@ -549,6 +565,29 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
         return HttpServer.Response.json(
             JSONObject().put("ok", true).put("check", "started")
                 .put("force", force).toString()
+        )
+    }
+
+    /**
+     * Manual rebind attempt (1.3.2). Runs on the HTTP worker thread (the
+     * attempt sleeps/polls up to ~11 s — never call this from the main
+     * thread). Token-auth applies like every other endpoint (see route()).
+     */
+    private fun rebind(): HttpServer.Response {
+        val state = BindingState.from(ctx)
+        val manager = RebindManager(
+            AndroidSecureSettings(ctx), state,
+            { RvgAccessibilityService.isEnabled() }
+        )
+        val result = manager.rebind()
+        return HttpServer.Response.json(
+            JSONObject()
+                .put("ok", result.outcome == "REBOUND" || result.outcome == "ALREADY_BOUND")
+                .put("outcome", result.outcome)
+                .put("detail", result.detail)
+                .put("attemptsInEpisode", result.attemptsInEpisode)
+                .put("elapsedMs", result.elapsedMs)
+                .toString()
         )
     }
 

@@ -58,6 +58,7 @@ class MainActivity : Activity() {
         btn("3. Allow Notifications") { requestNotifications() }
         btn("Start Agent") { RvgService.start(this); refresh() }
         btn("Stop Agent") { RvgService.stop(this); refresh() }
+        btn("Re-enable accessibility now") { rebindNow() }
         btn("Copy Token (backup to Drive)") { copyToken() }
         btn("Check for Updates") { UpdateManager.checkNow(this) }
 
@@ -75,14 +76,39 @@ class MainActivity : Activity() {
         val svc = RvgService.running
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         val battOk = pm.isIgnoringBatteryOptimizations(packageName)
+        val bs = BindingState.from(this)
+        val listed = RebindManager.isListed(AndroidSecureSettings(this))
+        val grant = AndroidSecureSettings.isGrantHeld(this)
         statusText.text = """
             Agent running: $svc (port 8899)
-            Accessibility: ${if (acc) "ENABLED" else "NOT ENABLED"}
+            Accessibility: ${if (acc) "ENABLED" else "NOT ENABLED"}${if (!acc && listed) " (dropped — still listed)" else ""}
             Screenshots: ${if (acc) "READY (via accessibility)" else "need accessibility"}
             Battery optimization disabled: $battOk
+            Auto-rebind: ${if (grant) "available (grant held)" else "unavailable — one-time adb grant needed"}
+            Unbinds: ${bs.unbindCount}${if (bs.lastUnbindAtMs > 0) " (last ${java.util.Date(bs.lastUnbindAtMs)})" else ""}
+            Last rebind: ${bs.lastOutcome ?: "—"}
             Update: ${UpdateManager.updateVersion(this)?.let { "v$it available" } ?: "latest"}${UpdateManager.lastUpdateError(this)?.let { " (last error: $it)" } ?: ""}
             Token: ${TokenStore.getToken(this).take(12)}...
         """.trimIndent()
+    }
+
+    /** 1.3.2: programmatic rebind when the grant is held (background thread —
+     *  the attempt sleeps/polls ~11 s); otherwise today's Settings path. */
+    private fun rebindNow() {
+        if (!AndroidSecureSettings.isGrantHeld(this)) {
+            openAccessibilitySettings()
+            return
+        }
+        Thread {
+            val result = RebindManager(
+                AndroidSecureSettings(this), BindingState.from(this),
+                { RvgAccessibilityService.isEnabled() }
+            ).rebind()
+            runOnUiThread {
+                Toast.makeText(this, "Rebind: ${result.outcome}", Toast.LENGTH_LONG).show()
+                refresh()
+            }
+        }.start()
     }
 
     private fun openAccessibilitySettings() {

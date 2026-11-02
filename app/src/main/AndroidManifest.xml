@@ -16,6 +16,15 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- 1.3.3: best-effort silent self-update. AOSP honors
+         SessionParams.USER_ACTION_NOT_REQUIRED for an installer updating
+         itself when it DECLARES this permission and targets API 29+.
+         It is signature|privileged, so a sideloaded app cannot HOLD
+         it — declaration is what the documented condition asks for.
+         If the platform still prompts, the STATUS_PENDING_USER_ACTION
+         branch in UpdateInstallReceiver launches the confirmation
+         dialog; the silent attempt is never load-bearing. -->
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         android:maxSdkVersion="32" />

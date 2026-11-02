@@ -32,19 +32,21 @@ import java.net.URL
  *    re-registration. The metered-data caution (metadata-only daily
  *    checks, no auto-download) is superseded by Seth's auto-update word.
  *
- * HONEST LIMIT, stated plainly (do not promise past it): this build
- * deliberately does NOT set SessionParams.requireUserAction to
- * NOT_REQUIRED. That flag is honored only for system installers and
- * INSTALL_PACKAGES holders; setting it from a sideloaded app risks a
- * SecurityException and buys nothing. On Android 16, for a non-system
- * installer, the platform may still surface its confirmation dialog
- * before the session installs. The install pilot MUST observe that
- * dialog: if it is RVG-tappable, updates are effectively
- * self-installed; if it is finger-only, one Install tap per update
- * remains (still a large saving versus uninstall + reinstall +
- * token re-register). Until the pilot observes it, "auto update"
- * means automatic check + download + verify + staged session — not
- * a proven zero-tap install.
+ * HONEST LIMIT, stated plainly (do not promise past it): 1.3.3
+ * ATTEMPTS a genuinely silent self-update, but it is best-effort,
+ * not proven. installViaSession tries SessionParams.requireUserAction
+ * = NOT_REQUIRED first (API 31+ only), which AOSP honors for an
+ * installer updating itself when it declares
+ * UPDATE_PACKAGES_WITHOUT_USER_ACTION and targets API 29+. If the
+ * platform rejects the silent params, the install is retried once
+ * with the default params, and the platform's confirmation dialog is
+ * surfaced through the STATUS_PENDING_USER_ACTION branch in
+ * UpdateInstallReceiver (which launches it — 1.3.1 never did, and
+ * mis-recorded the pending state as "install failed: status -1").
+ * Until the pilot observes either a zero-tap install or the
+ * confirmation dialog on the phone, "auto update" means automatic
+ * check + download + verify + staged session — not a proven zero-tap
+ * install.
  *
  * Gates (all enforced before any install is attempted, see
  * UpdateVerify): source host allowlist, signer-certificate equality
@@ -169,7 +171,7 @@ object UpdateManager {
                 val previous = installedVersion(context)
                 if (installViaSession(context, apk, info.version, previous)) {
                     clearPending(context)
-                    recordInstallResult(context, "install started for ${info.version} (was $previous) — awaiting system confirmation")
+                    recordInstallResult(context, "install started for ${info.version} (was $previous)")
                     if (userInitiated) toastOnUi(context, "Installing update v${info.version}…")
                 } else {
                     apk.delete()
@@ -265,9 +267,22 @@ object UpdateManager {
     /**
      * Installs via a PackageInstaller session (an UPDATE: state
      * preserved, no uninstall, no token re-register). Returns true
-     * when the session committed; the result callback lands in
-     * UpdateInstallReceiver. The temp APK is deleted by the caller
-     * after commit — the session already owns the bytes.
+     * when a session committed; the result callback lands in
+     * UpdateInstallReceiver. On a successful commit the temp APK is
+     * deleted here (the session already owns the bytes); on failure
+     * it is left for the caller, which deletes it.
+     *
+     * 1.3.3: tries a genuinely silent install first (API 31+ only —
+     * setRequireUserAction was added in API 31; minSdk is 29). AOSP
+     * honors USER_ACTION_NOT_REQUIRED for an installer updating itself
+     * when it declares UPDATE_PACKAGES_WITHOUT_USER_ACTION and targets
+     * API 29+. If the silent attempt fails SYNCHRONOUSLY (the platform
+     * rejecting the flag at createSession/commit), the failed session
+     * is abandoned and the install is retried once with the default
+     * params — the old, proven path, which surfaces the confirmation
+     * dialog via STATUS_PENDING_USER_ACTION. A synchronous failure
+     * therefore cannot brick the update; the async result (SUCCESS or
+     * PENDING_USER_ACTION) still arrives at the receiver either way.
      */
     private fun installViaSession(
         context: Context,
@@ -275,6 +290,27 @@ object UpdateManager {
         version: String,
         previous: String
     ): Boolean {
+        if (attemptInstallSession(context, apk, version, previous, silent = true)) {
+            return true
+        }
+        return attemptInstallSession(context, apk, version, previous, silent = false)
+    }
+
+    /**
+     * One session attempt. Returns true when the session committed.
+     * On any synchronous failure the session (if created) is abandoned
+     * and false is returned; the APK file is left for the caller (it
+     * deletes it on the failure path, or after a successful commit the
+     * session owns the bytes and the file is deleted here).
+     */
+    private fun attemptInstallSession(
+        context: Context,
+        apk: File,
+        version: String,
+        previous: String,
+        silent: Boolean
+    ): Boolean {
+        var sessionId = -1
         return try {
             val installer = context.packageManager.packageInstaller
             val params = PackageInstaller.SessionParams(
@@ -282,11 +318,12 @@ object UpdateManager {
             )
             params.setAppPackageName(context.packageName)
             params.setSize(apk.length())
-            // Deliberately NOT setting requireUserAction NOT_REQUIRED:
-            // it is honored only for system installers / INSTALL_PACKAGES
-            // holders. The platform confirmation dialog (if any) is the
-            // pilot's observation, not something this build pretends away.
-            val sessionId = installer.createSession(params)
+            if (silent && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                params.setRequireUserAction(
+                    PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED
+                )
+            }
+            sessionId = installer.createSession(params)
             installer.openSession(sessionId).use { session ->
                 session.openWrite("update", 0, apk.length()).use { out ->
                     apk.inputStream().use { it.copyTo(out) }
@@ -305,6 +342,13 @@ object UpdateManager {
             apk.delete()
             true
         } catch (_: Exception) {
+            if (sessionId >= 0) {
+                try {
+                    context.packageManager.packageInstaller.abandonSession(sessionId)
+                } catch (_: Exception) {
+                    // Best effort only; the system cleans up abandoned sessions.
+                }
+            }
             false
         }
     }

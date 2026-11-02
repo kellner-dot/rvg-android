@@ -114,6 +114,17 @@ class RvgService : Service() {
 
     override fun onDestroy() {
         watchdogHandler.removeCallbacks(bindingWatchdog)
+        // 1.3.4: never strand the phone on the keyless RVG keyboard when
+        // the agent stops. Best-effort only — onDestroy is not guaranteed
+        // if the process is killed, so POST /rvd/ime (target gboard)
+        // stays the documented teardown path. Never throws.
+        try {
+            if (AndroidSecureSettings.isGrantHeld(this)) {
+                val t = ImeToggleAndroid.create(this)
+                if (t.state().rvgActive) t.switchAwayFromRvg()
+            }
+        } catch (_: Exception) {
+        }
         http?.stop()
         http = null
         running = false

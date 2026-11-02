@@ -59,6 +59,7 @@ class MainActivity : Activity() {
         btn("Start Agent") { RvgService.start(this); refresh() }
         btn("Stop Agent") { RvgService.stop(this); refresh() }
         btn("Re-enable accessibility now") { rebindNow() }
+        btn("Switch keyboard (RVG ⇄ Gboard)") { toggleKeyboard() }
         btn("Copy Token (backup to Drive)") { copyToken() }
         btn("Check for Updates") { UpdateManager.checkNow(this) }
 
@@ -79,17 +80,46 @@ class MainActivity : Activity() {
         val bs = BindingState.from(this)
         val listed = RebindManager.isListed(AndroidSecureSettings(this))
         val grant = AndroidSecureSettings.isGrantHeld(this)
+        val imeState = ImeToggleAndroid.state(this)
         statusText.text = """
             Agent running: $svc (port 8899)
             Accessibility: ${if (acc) "ENABLED" else "NOT ENABLED"}${if (!acc && listed) " (dropped — still listed)" else ""}
             Screenshots: ${if (acc) "READY (via accessibility)" else "need accessibility"}
             Battery optimization disabled: $battOk
+            Keyboard: ${ImeToggleAndroid.shortName(imeState.current)} (RVG enabled: ${if (imeState.rvgEnabled) "yes" else "no"}${if (!grant) ", one-tap switch needs the adb grant" else ""})
             Auto-rebind: ${if (grant) "available (grant held)" else "unavailable — one-time adb grant needed"}
             Unbinds: ${bs.unbindCount}${if (bs.lastUnbindAtMs > 0) " (last ${java.util.Date(bs.lastUnbindAtMs)})" else ""}
             Last rebind: ${bs.lastOutcome ?: "—"}
             Update: ${UpdateManager.updateVersion(this)?.let { "v$it available" } ?: "latest"}${UpdateManager.lastUpdateError(this)?.let { " (last error: $it)" } ?: ""}
             Token: ${TokenStore.getToken(this).take(12)}...
         """.trimIndent()
+    }
+
+    /** 1.3.4: one-tap keyboard toggle (RVG ⇄ Gboard). Without the grant
+     *  the toggle cannot write the secure settings, so open the system
+     *  input-method settings instead — never a silent no-op. */
+    private fun toggleKeyboard() {
+        if (!AndroidSecureSettings.isGrantHeld(this)) {
+            startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+            Toast.makeText(
+                this,
+                "One-time adb grant needed for one-tap switch — enable the keyboard in Settings",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        Thread {
+            val result = ImeToggleAndroid.create(this).toggle()
+            runOnUiThread {
+                Toast.makeText(
+                    this, "Keyboard: ${result.outcome} — ${result.detail}",
+                    Toast.LENGTH_LONG
+                ).show()
+                refresh()
+            }
+        }.start()
     }
 
     /** 1.3.2: programmatic rebind when the grant is held (background thread —

@@ -31,7 +31,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * keyboard -> enable "RVG Keyboard", then switch to it (globe/keyboard
  * icon) whenever remote typing is needed. The keyboard shows no UI
  * (onEvaluateInputViewShown() = false); it only serves remote input.
- * /rvd/status reports "imeEnabled" / "imeActive" so remote callers know.
+ * Since 1.3.4 the switch can also be done programmatically (POST
+ * /rvd/ime, or the in-app toggle) once the one-time WRITE_SECURE_SETTINGS
+ * adb grant is held — see ImeToggle. The manual Settings path stays as
+ * the fallback when the grant is missing. /rvd/status reports
+ * "imeEnabled" / "imeActive" (RVG-only) plus "imeCurrent" /
+ * "imeEnabledList" / "imeGrantHeld" so remote callers know.
  */
 class RvgInputMethodService : InputMethodService() {
 
@@ -85,10 +90,11 @@ class RvgInputMethodService : InputMethodService() {
          * IME itself may call with NO system/signature permission.
          * Returns false when the RVG IME is not the current IME (then
          * there is nothing to switch away from) or when no next IME
-         * exists. Switching TO the RVG keyboard programmatically is
-         * NOT possible for a normal app (needs WRITE_SECURE_SETTINGS,
-         * system apps only) — setup stays finger-assisted by platform
-         * design, and this method must never be presented as fixing it.
+         * exists. Kept for the legacy {"imeswitchback":true} call;
+         * new code should prefer ImeToggle (POST /rvd/ime), which
+         * can also switch TO the RVG keyboard once the
+         * WRITE_SECURE_SETTINGS grant is held and names its fallback
+         * explicitly instead of "next".
          */
         fun switchBack(): Boolean {
             val ime = instance ?: return false

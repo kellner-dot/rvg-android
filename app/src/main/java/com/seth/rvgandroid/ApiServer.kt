@@ -53,6 +53,17 @@ import java.security.MessageDigest
  *                                  "elapsedMs"}. Refuses when the service is
  *                                  not listed (user turned it off) or the
  *                                  WRITE_SECURE_SETTINGS grant is missing.
+ *   POST /rvd/ime              -> switch the current keyboard (1.3.4):
+ *                                  {"target":"rvg"|"gboard"|"toggle"}; returns
+ *                                  {"ok","outcome","detail","active","enabled",
+ *                                  "grantHeld"}. Needs the WRITE_SECURE_SETTINGS
+ *                                  grant; without it, refuses and the manual
+ *                                  Settings path is the fallback. The legacy
+ *                                  {"imeswitchback":true} in /rvd/input is
+ *                                  untouched (one-way switch-away for old
+ *                                  callers). /rvd/status reports "imeCurrent" /
+ *                                  "imeEnabledList" / "imeGrantHeld" alongside
+ *                                  the existing RVG-only "imeEnabled"/"imeActive".
  *   POST /rvd/exec              -> {"command":"..."} limited command set
  *   GET  /rvd/download?path=    -> file bytes (sandbox-scoped)
  *   POST /rvd/upload            -> multipart file -> inbox dir
@@ -100,6 +111,7 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
                 req.path == "/rvd/input" && req.method == "POST" -> input(req)
                 req.path == "/rvd/update" && req.method == "POST" -> update(req)
                 req.path == "/rvd/rebind" && req.method == "POST" -> rebind()
+                req.path == "/rvd/ime" && req.method == "POST" -> ime(req)
                 req.path == "/rvd/exec" && req.method == "POST" -> exec(req)
                 req.path == "/rvd/download" && req.method == "GET" -> download(req)
                 req.path == "/rvd/upload" && req.method == "POST" -> upload(req)
@@ -119,6 +131,7 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
         val metrics = android.util.DisplayMetrics()
         @Suppress("DEPRECATION")
         wm.defaultDisplay.getRealMetrics(metrics)
+        val imeState = ImeToggleAndroid.state(ctx)
         val o = JSONObject()
             .put("ok", true)
             .put("version", appVersion())
@@ -143,6 +156,11 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
             .put("rebindLastAtMs", BindingState.from(ctx).lastAttemptMs())
             .put("imeEnabled", RvgInputMethodService.isEnabled(ctx))
             .put("imeActive", RvgInputMethodService.isActive(ctx))
+            // Keyboard toggle state (1.3.4): active IME id + enabled set +
+            // whether the grant-backed toggle is available.
+            .put("imeCurrent", imeState.current ?: JSONObject.NULL)
+            .put("imeEnabledList", org.json.JSONArray(imeState.enabled))
+            .put("imeGrantHeld", AndroidSecureSettings.isGrantHeld(ctx))
             // Self-update reporting (existing status path — every
             // check/install/version transition lands here, never silent).
             .put("updateAvailable", UpdateManager.updateAvailable(ctx))
@@ -425,10 +443,12 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
             )
         }
         if (j.has("imeswitchback")) {
-            // Teardown only: switch AWAY from the RVG keyboard to the
-            // next IME (normally Gboard). Switching TO RVG still needs
-            // the user — no system permission exists for a normal app
-            // to select itself. False when RVG IME is not active.
+            // Legacy teardown call (1.3.0): switch AWAY from the RVG
+            // keyboard to the next IME (normally Gboard). Kept for old
+            // callers; new code should use POST /rvd/ime (1.3.4), which
+            // can also switch TO the RVG keyboard via the grant-backed
+            // toggle and names its fallback explicitly. False when the
+            // RVG IME is not active.
             val ok = RvgInputMethodService.switchBack()
             return HttpServer.Response.json("{\"ok\":$ok}")
         }
@@ -587,6 +607,32 @@ class ApiServer(private val ctx: Context, private val http: HttpServer) {
                 .put("detail", result.detail)
                 .put("attemptsInEpisode", result.attemptsInEpisode)
                 .put("elapsedMs", result.elapsedMs)
+                .toString()
+        )
+    }
+
+    /** Keyboard toggle (1.3.4): {"target":"rvg"|"gboard"|"toggle"}. */
+    private fun ime(req: HttpServer.Request): HttpServer.Response {
+        val j = JSONObject(String(req.body, Charsets.UTF_8))
+        val target = j.optString("target", "").trim().lowercase()
+        val toggle = ImeToggleAndroid.create(ctx)
+        val result = when (target) {
+            "rvg" -> toggle.switchTo(ImeTarget.RVG)
+            "gboard" -> toggle.switchTo(ImeTarget.GBOARD)
+            "toggle" -> toggle.toggle()
+            else -> return HttpServer.Response.jsonErr(
+                400, "unknown ime target (rvg | gboard | toggle)"
+            )
+        }
+        val ok = result.outcome == "SWITCHED" || result.outcome == "ALREADY_ACTIVE"
+        return HttpServer.Response.json(
+            JSONObject()
+                .put("ok", ok)
+                .put("outcome", result.outcome)
+                .put("detail", result.detail)
+                .put("active", result.active ?: JSONObject.NULL)
+                .put("enabled", org.json.JSONArray(result.enabled))
+                .put("grantHeld", AndroidSecureSettings.isGrantHeld(ctx))
                 .toString()
         )
     }

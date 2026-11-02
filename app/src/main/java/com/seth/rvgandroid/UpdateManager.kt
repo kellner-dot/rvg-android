@@ -335,7 +335,11 @@ object UpdateManager {
                 }
                 val pi = PendingIntent.getBroadcast(
                     context, sessionId, intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    // MUST be mutable: AOSP delivers the session result as
+                    // a fill-in Intent, silently discarded for an immutable
+                    // PendingIntent (1.3.3/1.3.4 failure). See
+                    // commitStatusReceiverFlags.
+                    commitStatusReceiverFlags()
                 )
                 session.commit(pi.intentSender)
             }
